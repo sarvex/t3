@@ -982,15 +982,11 @@ namespace T3.Editor.Gui.Graph
 
             using (var writer = new StringWriter())
             {
-                var json = new SymbolJson { Writer = new JsonTextWriter(writer) { Formatting = Formatting.Indented } };
-                json.Writer.WriteStartArray();
-
-                json.WriteSymbol(containerOp);
-
-                var jsonUi = new SymbolUiJson { Writer = json.Writer };
-                jsonUi.WriteSymbolUi(newContainerUi);
-
-                json.Writer.WriteEndArray();
+                var jsonWriter = new JsonTextWriter(writer);
+                jsonWriter.WriteStartArray();
+                SymbolJson.WriteSymbol(containerOp, jsonWriter);
+                SymbolUiJson.WriteSymbolUi(newContainerUi, jsonWriter);
+                jsonWriter.WriteEndArray();
 
                 try
                 {
@@ -1013,16 +1009,29 @@ namespace T3.Editor.Gui.Graph
                 var text = Clipboard.GetText();
                 using (var reader = new StringReader(text))
                 {
-                    var json = new SymbolJson { Reader = new JsonTextReader(reader) };
-                    if (!(JToken.ReadFrom(json.Reader) is JArray o))
+                    var jsonReader = new JsonTextReader(reader);
+                    if (JToken.ReadFrom(jsonReader, SymbolJson.LoadSettings) is not JArray jArray)
                         return;
 
-                    var symbolJson = o[0];
-                    var containerSymbol = json.ReadSymbol(null, symbolJson, true);
+                    var symbolJson = jArray[0];
+                    
+                    var gotSymbolJson = SymbolJson.TryReadSymbol(null, symbolJson, out var containerSymbol, true);
+                    if (!gotSymbolJson)
+                    {
+                        Log.Error($"Failed to paste symbol due to invalid symbol json");
+                        return;
+                    }
+                    
                     SymbolRegistry.Entries.Add(containerSymbol.Id, containerSymbol);
 
-                    var symbolUiJson = o[1];
-                    var containerSymbolUi = SymbolUiJson.ReadSymbolUi(symbolUiJson);
+                    var symbolUiJson = jArray[1];
+                    var hasContainerSymbolUi = SymbolUiJson.TryReadSymbolUi(symbolUiJson, out var containerSymbolUi);
+                    if (!hasContainerSymbolUi)
+                    {
+                        Log.Error($"Failed to paste symbol due to invalid symbol ui json");
+                        return;
+                    }
+                    
                     var compositionSymbolUi = SymbolUiRegistry.Entries[CompositionOp.Symbol.Id];
                     SymbolUiRegistry.Entries.Add(containerSymbolUi.Symbol.Id, containerSymbolUi);
                     var cmd = new CopySymbolChildrenCommand(containerSymbolUi,
@@ -1051,21 +1060,21 @@ namespace T3.Editor.Gui.Graph
                     }
                 }
             }
-            catch (Exception)
+            catch (Exception e)
             {
-                Log.Warning("Could not copy actual selection to clipboard.");
+                Log.Warning("Could not paste selection from clipboard.");
+                Log.Debug("Paste exception: " + e);
             }
         }
 
         private void DrawGrid()
         {
-            var color = new Color(0, 0, 0, 0.15f);
             var gridSize = Math.Abs(64.0f * Scale.X);
             for (var x = (-Scroll.X * Scale.X) % gridSize; x < WindowSize.X; x += gridSize)
             {
                 DrawList.AddLine(new Vector2(x, 0.0f) + WindowPos,
                                  new Vector2(x, WindowSize.Y) + WindowPos,
-                                 color);
+                                 GridColor);
             }
 
             for (var y = (-Scroll.Y * Scale.Y) % gridSize; y < WindowSize.Y; y += gridSize)
@@ -1073,7 +1082,7 @@ namespace T3.Editor.Gui.Graph
                 DrawList.AddLine(
                                  new Vector2(0.0f, y) + WindowPos,
                                  new Vector2(WindowSize.X, y) + WindowPos,
-                                 color);
+                                 GridColor);
             }
         }
 
@@ -1117,6 +1126,7 @@ namespace T3.Editor.Gui.Graph
         public static readonly LibWarningDialog LibWarningDialog = new();
 
         //public override SelectionHandler SelectionHandler { get; } = new SelectionHandler();
+        private static readonly Color GridColor = new(0, 0, 0, 0.15f);
         private List<SymbolChildUi> ChildUis { get; set; }
         public readonly SymbolBrowser SymbolBrowser = new SymbolBrowser();
         private string _symbolNameForDialogEdits = "";

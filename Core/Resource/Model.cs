@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using Newtonsoft.Json;
@@ -442,51 +443,90 @@ namespace T3.Core.Resource
             InputValueCreators.Entries.Add(type, defaultValueCreator);
         }
 
-        public virtual void Load()
+        private Dictionary<Guid, JsonFileResult<Symbol>> _symbolJsonTokens = new();
+
+        public virtual void Load(bool enableLog)
         {
             var symbolFiles = Directory.GetFiles(OperatorTypesFolder, $"*{SymbolExtension}", SearchOption.AllDirectories);
-            foreach (var symbolFilePath in symbolFiles)
-            {
-                ReadSymbolFromFile(symbolFilePath);
-            }
 
-            // check if there are symbols without a file, if yes add these
-            var instanceTypes = (from type in OperatorsAssembly.ExportedTypes
-                                 where type.IsSubclassOf(typeof(Instance))
-                                 where !type.IsGenericType
-                                 select type).ToList();
+            _symbolJsonTokens = symbolFiles.AsParallel()
+                                           .Select(JsonFileResult<Symbol>.ReadAndCreate)
+                                           .ToDictionary(x => x.Guid, x => x);
+            
+            _ = _symbolJsonTokens.AsParallel()
+                                 .Select(TryReadSymbolFromJsonFileResult)
+                                 .ToList(); // Execute and bring back to main thread
 
-            foreach (var symbol in SymbolRegistry.Entries.Values)
+            foreach (var idJsonTokenPair in _symbolJsonTokens )
             {
-                for (int i = instanceTypes.Count - 1; i >= 0; i--)
+                var jsonResult = idJsonTokenPair.Value;
+                if (jsonResult.ObjectWasSet)
                 {
-                    if (symbol.InstanceType == instanceTypes[i])
-                    {
-                        instanceTypes.RemoveAt(i);
-                        break;
-                    }
+                    SymbolRegistry.Entries.TryAdd(jsonResult.Object.Id, jsonResult.Object);
                 }
             }
 
-            foreach (var newType in instanceTypes)
-            {
-                string @namespace = _innerNamespace.Replace(newType.Namespace ?? string.Empty, "").ToLower();
+            // Check if there are symbols without a file, if yes add these
+            var instanceTypesWithoutFile = (from type in OperatorsAssembly.ExportedTypes
+                                 where type.IsSubclassOf(typeof(Instance))
+                                 where !type.IsGenericType
+                                 select type).ToHashSet();
 
-                string idFromNamespace = _idFromNamespace.Match(newType.Namespace ?? string.Empty).Value.Replace('_', '-');
-                Debug.Assert(!string.IsNullOrEmpty(idFromNamespace));
+            foreach (var symbol in SymbolRegistry.Entries.Values)
+            {
+                instanceTypesWithoutFile.Remove(symbol.InstanceType);
+            }
+
+            foreach (var newType in instanceTypesWithoutFile)
+            {
+                var typeNamespace = newType.Namespace;
+                if (string.IsNullOrWhiteSpace(typeNamespace))
+                {
+                    Log.Error($"Null or empty namespace of type {newType.Name}");
+                    continue;
+                } 
+                
+                var @namespace = _innerNamespace.Replace(newType.Namespace ?? string.Empty, "").ToLower();
+                var idFromNamespace = _idFromNamespace
+                                     .Match(newType.Namespace ?? string.Empty).Value
+                                     .Replace('_', '-');
+
+                Debug.Assert(!string.IsNullOrWhiteSpace(idFromNamespace));
                 var symbol = new Symbol(newType, Guid.Parse(idFromNamespace))
                                  {
                                      Namespace = @namespace,
                                      Name = newType.Name
                                  };
 
-                if (SymbolRegistry.Entries.ContainsKey(symbol.Id))
+                var added = SymbolRegistry.Entries.TryAdd(symbol.Id, symbol);
+                if (!added)
                 {
                     Log.Error($"Ignoring redefinition symbol {symbol.Name}. Please fix multiple definitions in Operators/Types/ folder");
                     continue;
                 }
-                SymbolRegistry.Entries.Add(symbol.Id, symbol);
-                Console.WriteLine($"new added symbol: {newType}");
+                
+                if(enableLog)
+                    Log.Debug($"new added symbol: {newType}");
+            }
+
+            (bool success, Symbol symbol) TryReadSymbolFromJsonFileResult(KeyValuePair<Guid, JsonFileResult<Symbol>> idJsonResultPair)
+            {
+                var jsonInfo = idJsonResultPair.Value;
+                var success = SymbolJson.TryReadSymbol(this, jsonInfo.Guid, jsonInfo.JToken, out var symbol, allowNonOperatorInstanceType: false);
+                if (success)
+                {
+                    // This jsonInfo.Object can be read/assigned outside of this thread, so we should lock it 
+                    lock (jsonInfo)
+                    {
+                        jsonInfo.Object = symbol;
+                    }
+                }
+                else
+                {
+                    Log.Warning($"Failed to load symbol {jsonInfo.Guid}");
+                }
+
+                return (success, symbol);
             }
         }
 
@@ -496,48 +536,36 @@ namespace T3.Core.Resource
         private readonly Regex _idFromNamespace = new Regex(@"(\{){0,1}[0-9a-fA-F]{8}_[0-9a-fA-F]{4}_[0-9a-fA-F]{4}_[0-9a-fA-F]{4}_[0-9a-fA-F]{12}(\}){0,1}",
                                                             RegexOptions.IgnoreCase);
 
-        private Symbol ReadSymbolFromFile(string filepath)
+        internal bool TryReadSymbolWithId(Guid symbolId, out Symbol symbol)
         {
-            Log.Info($" read symbol: `{filepath}`");
-            using var streamReader = new StreamReader(filepath);
-            using var jsonReader = new JsonTextReader(streamReader);
-
-            try 
+            var hasJsonInfo = _symbolJsonTokens.TryGetValue(symbolId, out var jsonInfo); // todo: TryGet
+            if (!hasJsonInfo)
             {
-                var symbolJson = new SymbolJson { Reader = jsonReader };
-                var symbol = symbolJson.ReadSymbol(this);
-                if (symbol == null)
-                    return null;
-
-                //symbol.SourcePath = OperatorTypesFolder + symbol.Name + SourceExtension;
-                SymbolRegistry.Entries.Add(symbol.Id, symbol);
-
-                return symbol;
+                symbol = null;
+                return false;
             }
-            catch (Newtonsoft.Json.JsonReaderException e)
+
+            if (jsonInfo.Object is null)
             {
-                throw new Exception($"Failed to load...\n\n {filepath}\n\n{e.Message}");
+                var success = SymbolJson.TryReadSymbol(this, jsonInfo.Guid, jsonInfo.JToken, out symbol, false);
+                if (!success)
+                    return false;
+                
+                jsonInfo.Object = symbol;
+
+                return true;
             }
+
+            symbol = jsonInfo.Object;
+            return true;
         }
-
-        public Symbol ReadSymbolWithId(Guid id)
-        {
-            var symbolFile = Directory.GetFiles(OperatorTypesFolder, $"*{id}*{SymbolExtension}", SearchOption.AllDirectories).FirstOrDefault();
-            if (symbolFile == null)
-            {
-                Log.Error($"Could not find symbol file containing the id '{id}'");
-                return null;
-            }
-
-            var symbol = ReadSymbolFromFile(symbolFile);
-            return symbol;
-        }
-
+        
         public virtual void SaveAll()
         {
             ResourceFileWatcher.DisableOperatorFileWatcher(); // don't update ops if file is written during save
-
-            RemoveAllSymbolFiles();
+            
+            // todo: this sounds like a dangerous step. we should overwrite these files by default and can check which files are not overwritten to delete others?
+            RemoveAllSymbolFiles(); 
             SortAllSymbolSourceFiles();
             SaveSymbolDefinitionAndSourceFiles(SymbolRegistry.Entries.Values);
 
@@ -553,8 +581,7 @@ namespace T3.Core.Resource
                 using (var sw = new StreamWriter(filepath))
                 using (var writer = new JsonTextWriter(sw) { Formatting = Formatting.Indented })
                 {
-                    var symbolJson = new SymbolJson { Writer = writer };
-                    symbolJson.WriteSymbol(symbol);
+                    SymbolJson.WriteSymbol(symbol, writer);
                 }
 
                 if (!string.IsNullOrEmpty(symbol.PendingSource))
@@ -638,7 +665,7 @@ namespace T3.Core.Resource
             if (string.IsNullOrEmpty(symbol.DeprecatedSourcePath))
                 return;
 
-            foreach (var fileExtension in _operatorFileExtensions)
+            foreach (var fileExtension in OperatorFileExtensions)
             {
                 var sourceFilepath = Path.Combine(OperatorTypesFolder, symbol.DeprecatedSourcePath + "_" + symbol.Id + fileExtension);
                 try
@@ -710,13 +737,13 @@ namespace T3.Core.Resource
         #endregion
 
         private static OpUpdateCounter _updateCounter;
-        
+
         public const string SourceExtension = ".cs";
         private const string SymbolExtension = ".t3";
         protected const string SymbolUiExtension = ".t3ui";
         public const string OperatorTypesFolder = @"Operators\Types\";
 
-        private static readonly List<string> _operatorFileExtensions = new()
+        private static readonly List<string> OperatorFileExtensions = new()
                                                                            {
                                                                                SymbolExtension,
                                                                                SymbolUiExtension,
