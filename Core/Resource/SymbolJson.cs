@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Windows.Forms;
@@ -170,6 +169,7 @@ namespace T3.Core.Resource
             var symbolId = Guid.Parse(symbolChildJson[JsonKeys.SymbolId].Value<string>());
             if (!SymbolRegistry.Entries.TryGetValue(symbolId, out var symbol))
             {
+                Log.Debug("  Read sub symbol " + symbolId);
                 // If the used symbol hasn't been loaded so far ensure it's loaded now
                 var loaded = model.TryReadSymbolWithId(symbolId, out symbol);
                 if (!loaded)

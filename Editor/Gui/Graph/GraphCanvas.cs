@@ -46,6 +46,18 @@ namespace T3.Editor.Gui.Graph
 
         public void SetComposition(List<Guid> childIdPath, ICanvas.Transition transition)
         {
+            {
+                var instance = T3Ui.UiModel.RootInstance;
+                foreach (var child in instance.Children)
+                {
+                    var registrySymbol = SymbolRegistry.Entries[child.Symbol.Id];
+                    if (child.Symbol != registrySymbol)
+                    {
+                        Log.Error(" Inconsistent symbol for " + child);
+                    }
+                }                
+            }     
+            
             SelectableNodeMovement.Reset();
             // Zoom timeline out if necessary
             if (transition == ICanvas.Transition.JumpOut)

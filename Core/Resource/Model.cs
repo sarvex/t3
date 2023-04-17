@@ -508,28 +508,30 @@ namespace T3.Core.Resource
                 if(enableLog)
                     Log.Debug($"new added symbol: {newType}");
             }
-
-            (bool success, Symbol symbol) TryReadSymbolFromJsonFileResult(KeyValuePair<Guid, JsonFileResult<Symbol>> idJsonResultPair)
-            {
-                var jsonInfo = idJsonResultPair.Value;
-                var success = SymbolJson.TryReadSymbol(this, jsonInfo.Guid, jsonInfo.JToken, out var symbol, allowNonOperatorInstanceType: false);
-                if (success)
-                {
-                    // This jsonInfo.Object can be read/assigned outside of this thread, so we should lock it 
-                    lock (jsonInfo)
-                    {
-                        jsonInfo.Object = symbol;
-                    }
-                }
-                else
-                {
-                    Log.Warning($"Failed to load symbol {jsonInfo.Guid}");
-                }
-
-                return (success, symbol);
-            }
         }
 
+        private (bool success, Symbol symbol) TryReadSymbolFromJsonFileResult(KeyValuePair<Guid, JsonFileResult<Symbol>> idJsonResultPair)
+        {
+            Log.Debug("TryReadFromJson: " + idJsonResultPair.Key);
+            var jsonInfo = idJsonResultPair.Value;
+            var success = SymbolJson.TryReadSymbol(this, jsonInfo.Guid, jsonInfo.JToken, out var symbol, allowNonOperatorInstanceType: false);
+            if (success)
+            {
+                // This jsonInfo.Object can be read/assigned outside of this thread, so we should lock it 
+                lock (jsonInfo)
+                {
+                    jsonInfo.Object = symbol;
+                }
+            }
+            else
+            {
+                Log.Warning($"Failed to load symbol {jsonInfo.Guid}");
+            }
+
+            return (success, symbol);
+        }
+
+        
         private readonly Regex _innerNamespace = new Regex(@".Id_(\{){0,1}[0-9a-fA-F]{8}_[0-9a-fA-F]{4}_[0-9a-fA-F]{4}_[0-9a-fA-F]{4}_[0-9a-fA-F]{12}(\}){0,1}",
                                                            RegexOptions.IgnoreCase);
 

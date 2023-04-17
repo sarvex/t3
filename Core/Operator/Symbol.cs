@@ -74,8 +74,10 @@ namespace T3.Core.Operator
             InstanceType = instanceType;
             Name = instanceType.Name;
             Id = symbolId;
+            
+            Log.Debug("Create symbol " + Id);
 
-            // input identified by base interface
+            // Input identified by base interface
             Type inputSlotType = typeof(IInputSlot);
             var inputInfos = instanceType.GetFields().Where(f => inputSlotType.IsAssignableFrom(f.FieldType));
             var inputDefs = new List<InputDefinition>();
@@ -90,7 +92,7 @@ namespace T3.Core.Operator
                 inputDefs.Add(inputDef);
             }
 
-            // add in order for input ids that are given
+            // Add in order for input ids that are given
             if (orderedInputIds != null)
             {
                 foreach (Guid id in orderedInputIds)
@@ -104,10 +106,10 @@ namespace T3.Core.Operator
                 }
             }
 
-            // add the ones where no id was available to the end
+            // Add the ones where no id was available to the end
             InputDefinitions.AddRange(inputDefs);
 
-            // outputs identified by attribute
+            // Outputs identified by attribute
             var outputs = (from field in instanceType.GetFields()
                            let attributes = field.GetCustomAttributes(typeof(OutputAttribute), false)
                            from attr in attributes
